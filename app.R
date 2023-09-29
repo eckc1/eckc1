@@ -1,150 +1,246 @@
-#########################################################
-## ANOVA and Analysis for Symphylan Treatments at Steinke Farm  Dashboard Visualization
-## By: Connor Eck
-#########################################################
-
-
+library(shiny)
 library(reshape2)
+library(corrplot)
 library(ggplot2)
-library(plotly)
-library(ggpubr)
-library(gridExtra)
+library(reshape2)
+library(corrplot)
+
+library(shiny)
+library(reshape2)
+library(corrplot)
+library(ggplot2)
+library(dplyr)
 
 library(renv)
 library(shiny)
 library(rsconnect)
 
 
+# Load the CSV files
+umap <- read.csv("new_datasets/AT_root_scRNAseq_UMAP.csv")
+pca_data <- read.csv("new_datasets/AT_root_scRNAseq_PCA.csv")
+cluster_data <- read.csv("new_datasets/AT_root_scRNAseq_clustermap.csv")
+
+# Merge datasets based on CellBarcode
+merged_data <- merge(pca_data, cluster_data, by = "CellBarcode")
+
+# Calculate cluster average PCA values
+cluster_avg <- aggregate(. ~ seurat_clusters, data = merged_data[, -1], FUN = function(x) mean(x, na.rm = TRUE))
+t_cluster <- t(cluster_avg)
+
+# Calculate Pearson correlation
+cor_matrix <- cor(t_cluster[, -1], method = "pearson")
+
+# Convert correlation matrix to long format
+cor_long <- melt(cor_matrix)
+
+# Reshape correlation matrix to square form
+cor_square <- acast(cor_long, Var1 ~ Var2, value.var = "value")
+
+predicted <- read.csv("new_datasets/AT_root_scRNAseq_anticipatedmarkers.csv", header=T)
+predicted <- as.data.frame(t(predicted))
+predicted <- cbind(CellBarcode = rownames(predicted), predicted)
+rownames(predicted) <- NULL
+
+known <- read.csv("new_datasets/AT_root_scRNAseq_putativemarkers.csv")
+
+merged <- merge(umap, predicted, by="CellBarcode")
+merged <- merge(merged, known, by="CellBarcode") #merge dfs for marker expression plot
+
+
 # Define UI
+
 ui <- fluidPage(
-  mainPanel(
-    tabsetPanel(
-      tabPanel("Scatterplot",
-               plotlyOutput("scatterplot")),
-      tabPanel("Confidence Intervals",
-               selectInput("treatment", "Treatment:", choices = c("Control", "Bifenture", "Torac", "Brigade", "Capture", "WarriorII", "Bifender FC")),
-               verbatimTextOutput("result")),
-      tabPanel("ANOVA",
-               selectInput("anova_graph", "Select ANOVA Graph:",
-                           choices = c("Bait.1", "Bait.2", "Bait.3", "Bait.1.1", "Bait.2.1", "Bait.3.1",
-                                       "Bait.1.2", "Bait.2.2", "Bait.3.2")),
-               plotlyOutput("anova_plot")),
-      tabPanel("Correlation",
-               selectInput("correlation_plot", "Select Correlation Plot:",
-                           choices = c("Boxplot", "Barplot", "Scatterplot")),
-               plotOutput("correlation_output"))
+  titlePanel("BDS 411 Shiny App"),
+  tabsetPanel(
+    tabPanel("UMAP vs PCA",
+             fluidRow(
+               column(6,
+                      h2("UMAP"),
+                      checkboxGroupInput("choice","Color Cell Cluster",0:20, selected = 0:20,
+                                         inline=TRUE), #inline=TRUE makes it so it's not all one column
+                      checkboxGroupInput("display", "Display Unselected Cell Clusters?",
+                                         "Yes!", selected="Yes!")
+                      
+               ),
+               column(6,
+                      h2("PCA"),
+                      h4('Please select the values for X and Y: PC_# vs PC_# (Numbers between 1 and 50)'),
+                      numericInput(inputId = "pca_x", label = "For X values:", value = 1, min = 1, max = 50),
+                      numericInput(inputId = "pca_y", label = "For Y values:", value = 1, min = 1, max = 50)
+                      
+               )
+             ),
+             fluidRow(
+               column(6,
+                      plotOutput("umap")
+               ),
+               column(6,
+                      plotOutput("pca")
+               )
+             )
+    ),
+    tabPanel("Bar Chart & Heatmap",
+             fluidRow(
+               column(5,
+                      h2("Bar Chart"),
+                      h4("Counts the number of cells in each cell cluster"),
+                      plotOutput("barchart")
+                      
+               ),
+               column(5,
+                      h2("Heatmap"),
+                      h4("Pearson correlation in an all vs all comparison of cell clusters (based on cluster average PCA values)"),
+                      plotOutput("heatmap")
+               )
+             )
+    ),
+    tabPanel("Predicted or Known Markers",
+             column(2,
+                    selectInput("category", "Select a category of markers:",
+                                choices = c("Predicted", "Known")),
+                    uiOutput("sub_category")
+             ),
+             column(8,
+                    plotOutput("umap_expr")
+             )
     )
   )
 )
 
-# Define the server logic
-server <- function(input, output) {
-  # Read in the data
-  symph_data <- read.csv("filtered_symph_data.csv")
+# server() defines the UMAP and PCA to pass to ui
+server <- function(input, output, session) {
   
-  # Included columns for melting and analysis
-  included_columns <- c("Bait.1", "Bait.2", "Bait.3", "Bait.1.1", "Bait.2.1", "Bait.3.1", "Bait.1.2", "Bait.2.2", "Bait.3.2")
+  #import ggplot2
+  library (ggplot2)
+  library(dplyr)
   
-  # Melt the data for the scatterplot
-  melted_data <- reshape2::melt(symph_data, id.vars = "Treatment", measure.vars = included_columns)
+  #import data as "cell_pca"
+  umap_df <- read.csv("new_datasets/AT_root_scRNAseq_UMAP.csv")
+  pca_df <- read.csv("new_datasets/AT_root_scRNAseq_PCA.csv")
   
-  # Function to calculate the confidence intervals
-  calculateConfidenceIntervals <- function(data, treatment) {
-    included_columns <- c("Bait.1", "Bait.2", "Bait.3", "Bait.1.1", "Bait.2.1", "Bait.3.1", "Bait.1.2", "Bait.2.2", "Bait.3.2")
-    
-    # Subset the data for the specified treatment and include the specified columns
-    treatment_data <- data[data$Treatment == treatment, included_columns]
-    
-    # Calculate the means of the "Bait" columns within the specified treatment group
-    means <- colMeans(treatment_data)
-    
-    # Calculate the standard errors for each "Bait" column
-    standard_errors <- apply(treatment_data, 2, function(x) sd(x) / sqrt(length(x)))
-    
-    # Calculate the critical value for a 95% confidence level
-    critical_value <- qt(0.975, nrow(treatment_data) - 1)
-    
-    # Calculate the margins of error for each "Bait" column
-    margins_of_error <- critical_value * standard_errors
-    
-    # Calculate the lower and upper bounds of the confidence intervals for each "Bait" column
-    lower_bounds <- means - margins_of_error
-    upper_bounds <- means + margins_of_error
-    
-    # Create a data frame to store the confidence intervals
-    confidence_intervals <- data.frame(Bait = included_columns, LowerBound = lower_bounds, UpperBound = upper_bounds)
-    
-    return(confidence_intervals)
-  }
+  cell_clusters <- read.csv("new_datasets/AT_root_scRNAseq_clustermap.csv")
   
-  # Update the result based on the selected confidence interval
-  output$result <- renderPrint({
-    treatment <- input$treatment
-    confidence_intervals <- calculateConfidenceIntervals(symph_data, treatment)
-    means <- colMeans(symph_data[symph_data$Treatment == treatment, included_columns])
-    
-    paste("Treatment:", treatment, "\n")
-    print(confidence_intervals)
-    paste("\nMeans:", "\n")
-    print(means)
-  })
+  #join clusters onto UMAP
+  umap_clusters<-left_join(umap_df, cell_clusters, by='CellBarcode')
+  pca_clusters <- left_join(pca_df, cell_clusters, by='CellBarcode')
   
-  # Render the scatterplot
-  output$scatterplot <- renderPlotly({
-    ggplotly(ggplot(melted_data, aes(x = Treatment, y = value, color = variable)) +
-               geom_point() +
-               geom_smooth(method = "lm", se = FALSE) +
-               labs(x = "Treatment", y = "Value", color = "Variable") +
-               ggtitle("Treatment vs. Variables"))
-  })
+  colors <- scales::hue_pal()(length(unique(umap_clusters$seurat_clusters))) #This gets you the default ggplot2 colormap
+  names(colors) <- as.character(0:20) #Give each color a cluster ID it can be mapped to (like Python Dictionary)
   
-  # Render the ANOVA plot
-  output$anova_plot <- renderPlotly({
-    variable <- input$anova_graph
-    
-    # Define a vector of unique colors for the ANOVA graphs
-    anova_colors <- c("blue", "red", "purple", "orange", "yellow", "green", "cyan", "black", "pink")
-    
-    # Visualize the selected variable by Treatment with color grouping by Treatment
-    p <- ggplot(symph_data, aes(x = Treatment, y = symph_data[[variable]], fill = Treatment)) +
-      geom_boxplot() +
-      stat_compare_means(method = "anova") +
-      scale_fill_manual(values = anova_colors) +
-      ggtitle(paste("Comparison of", variable, "by Treatment")) +
-      xlab("Treatment") +
-      ylab(paste(variable, "Abundance"))
-    
-    ggplotly(p)
-  })
   
-  # Render the correlation plot
-  output$correlation_output <- renderPlot({
-    plot_type <- input$correlation_plot
+  output$umap <- renderPlot({
+    plot_mapping <- colors #Copy base color scale
     
-    if (plot_type == "Boxplot") {
-      boxplot(Germination ~ Treatment, data = symph_data,
-              xlab = "Treatment", ylab = "Germination Count",
-              main = "Treatment vs. Germination",
-              col = "red")
-    } else if (plot_type == "Barplot") {
-      barplot(symph_data$Germination, names.arg = symph_data$Treatment,
-              xlab = "Treatment", ylab = "Germination",
-              main = "Treatment vs. Germination",
-              col = "purple")
-    } else if (plot_type == "Scatterplot") {
-      # Assigns numbers to treatments
-      treatment_numeric <- as.numeric(factor(symph_data$Treatment))
+    
+    if(length(input$display) > 0){ #If the box is selected
       
-      # Creating a scatter plot with a line of best fit
-      ggplot(data = symph_data, aes(x = treatment_numeric, y = Germination)) +
-        geom_point() +
-        geom_smooth(method = "lm", se = FALSE, color = "blue") +
-        xlab("Treatment") +
-        ylab("Germination") +
-        ggtitle("Treatment vs. Germination")
+      other_color <- "black"
+      
+    } else{
+      
+      other_color <- "transparent" #transparent makes the dots disappear
+    }
+    plot_mapping[!(names(colors) %in% input$choice)] <- other_color
+    
+    ggplot(data = umap_clusters, aes(UMAP_1, UMAP_2, color=as.factor(seurat_clusters))) +
+      geom_point(alpha=0.6) +
+      scale_color_manual(values = plot_mapping) +
+      labs(color="Cell Cluster", x="UMAP Dimension 1", y="UMAP Dimension 2",
+           title="UMAP Projection of Single Cell Expression Profiles") + 
+      theme(text = element_text(size = 16), plot.title = element_text(hjust=0.5))
+  })
+  # Create a reactive expression for the PCA plots
+  pca_plot <- reactive({
+    
+    plot_mapping <- colors #Copy base color scale
+    
+    
+    if(length(input$display) > 0){ #If the box is selected
+      
+      other_color <- "black"
+      
+    } else{
+      
+      other_color <- "transparent" #transparent makes the dots disappear
+    }
+    plot_mapping[!(names(colors) %in% input$choice)] <- other_color
+    x_val <- paste0("PC_", as.character(input$pca_x))
+    y_val <- paste0("PC_", as.character(input$pca_y))
+    pca_data <- data.frame (PC_x  = pca_clusters[x_val],
+                            PC_y = pca_clusters[y_val],
+                            seurat_clusters = pca_clusters['seurat_clusters']
+    )
+    pca_data$seurat_clusters <- as.factor(pca_data$seurat_clusters)
+    
+    ggplot(data = pca_data, aes_string(x = x_val, y = y_val, color='seurat_clusters')) +
+      geom_point(alpha=0.6) + 
+      labs(title = paste0("PCA plot of ", x_val, " vs ", y_val)) +
+      scale_color_manual(values = plot_mapping) + 
+      theme(text = element_text(size = 16), plot.title = element_text(hjust=0.5), legend.position="none")
+  })
+  
+  # Render the PCA plot
+  output$pca <- renderPlot({
+    pca_plot()
+  })
+  
+  # Update the plot when both dropdown menus are changed
+  observeEvent((input$pca_x), {
+    output$pca <- renderPlot({
+      pca_plot()
+    })
+  })
+  observeEvent(c(input$pca_y), {
+    output$pca <- renderPlot({
+      pca_plot()
+    })
+  })
+  output$barchart <- renderPlot({
+    
+    clustermap <- read.csv("new_datasets/AT_root_scRNAseq_clustermap.csv")
+    grouping_df <- clustermap %>% group_by(seurat_clusters) %>% 
+      summarise(total_count=n(), .groups = 'drop')
+    # Barplot
+    ggplot(grouping_df, aes(seurat_clusters, total_count, color = as.factor(seurat_clusters), fill = as.factor(seurat_clusters))) + 
+      geom_bar(stat = "identity") + labs(title = "Number of Cells vs. Seurate Cell Cluster", x = "Seurate Cluster ID", y = "Number of Cells")
+  })
+  #new_pca <- PCA_clusters[-1]
+  #new_pca %>%
+  #group_by(seurat_clusters) %>%
+  #summarise(across(everything(), mean), .groups = 'drop') %>%
+  #head()
+  output$heatmap <- renderPlot({
+    # Generate heatmap using corrplot library
+    corrplot(cor_square, method = "color", order = "hclust", tl.col = "black")
+  })
+  
+  
+  sub_categories <- reactiveValues(predicted = colnames(predicted)[-1],
+                                   known = colnames(known)[-1])
+  
+  output$sub_category <- renderUI({
+    if (input$category == "Predicted") {
+      selectInput("predicted",
+                  "Select a marker:", choices = sub_categories$predicted)
+    } 
+    else if (input$category == "Known") {
+      selectInput("known", "Select a marker:", 
+                  choices = sub_categories$known)
     }
   })
+  
+  
+  output$umap_expr <- renderPlot({
+    if (input$category == "Predicted") {
+      ggplot(merged, aes_string(x = 'UMAP_1', y = 'UMAP_2', color=input$predicted, alpha=0.6)) +
+        geom_point()
+    } else if (input$category == "Known") {
+      ggplot(merged, aes_string(x = 'UMAP_1', y = 'UMAP_2', color=input$known, alpha=0.6)) +
+        geom_point()
+    }
+  })
+  
 }
-
-# Run the Shiny app
-shinyApp(ui = ui, server = server)
+# combine UI and server into Shiny
+shinyApp(ui, server)
